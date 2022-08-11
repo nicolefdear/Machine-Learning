@@ -1,0 +1,476 @@
+---
+title: "Random Forest Applied to Binary Classification of Viral Failure in AFRICOS at Enrollment Visit"
+author: "Nicole Dear"
+date: "July 1, 2021"
+output:
+  html_document:
+    df_print: paged
+    theme: lumen
+  pdf_document: default
+---
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+# installing/loading the package
+# if(!require(installr)) { install.packages("installr"); require(installr)} #load / install+load installr
+
+# Installing pandoc
+# install.pandoc()
+
+# rmarkdown::pandoc_version()
+
+library(rmarkdown)
+library(dplyr)
+library(tidyverse)
+library(aod)
+library(ggplot2)
+library(readstata13)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(randomForestSRC)
+library(ggRandomForests)
+library(xgboost)
+library(caTools)
+library(ROCR)
+library(partykit)
+library(pscl)
+library(tinytex)
+library(gtsummary)
+library(Hmisc)
+library(tableone)
+```
+
+
+### Random Forest: Strengths
+
+1. Good accuracy
+2. Fast
+3. Does not overfit
+
+
+### Random Forest: Limitations
+
+1. Requires a complete matrix (i.e. no missingness)
+2. Correlated features will be given equal or similar importance, but overall reduced importance compared to the same tree built without correlated counterparts
+3. Give preference to features with high cardinality
+4. Goal is to build a prediction model vs extracting information about the underlying process
+
+
+### Feature Selection
+
+1. Variable importance (VIMP): Measures the impact of randomly permuting/shuffling a variable, larger values indicate greater importance
+2. Depth: the more important the variable, the earlier in tree the variable creates a split, smaller values indicate greater importance
+
+
+### How RF Works
+
+-Random Forests train each tree independently, using a random (bootstrap) sample of the data; this randomness helps to make the model more robust than a single decision tree, and less likely to overfit on the training data
+-Each bootstrap sample selects approx. two-thirds of the population on average
+-The remaining third of observations, the Out-of-Bag (OOB) sample, can be used as a test set for each tree
+-The OOB prediction error is calculated for each observation by predicting the response over the set of trees in the test set
+-OOB prediction error estimates have been shown to be nearly identical to n-fold cross validation estimates
+-Random forest allows us to obtain model fit and validation in one pass
+-GOAL: Want smallest set of variables to achieve good diagnostic ability
+
+
+### Definitions
+
+-ntree: number of trees to be generated (typically test a range of values and choose the one that minimizes OOB error rate)
+-mtry: number of features used in the construction of each tree; selected at random; the default value when performing classification is sqrt[no. of features], can be optimized
+-OOB estimate of error rate = # points in the training set misclassified/total number observations
+
+
+```{r message=F, warning=F, echo=T}
+knitr::opts_knit$set(root.dir = "C:/Users/ndear/Documents/ndear")
+
+# set working directory
+# setwd("C:/Users/ndear/Documents/ndear")
+
+# load data
+A <- read.csv("C:/Users/ndear/Documents/ndear/ml_analysis_v1_onart_v2.csv")
+# A1 <- read.dta13("C:/Users/ndear/Documents/ndear/ml_analysis_v1_onart_v3.dta", generate.factors=T, nonint.factors=T)
+
+# make vf a factor variable
+# View(A)
+# y=A$vf
+# y=factor(A$vf)
+# A$vf=y
+
+# check for missing values
+# summary(A)
+
+# check variable type
+# sapply(A, class)
+
+# dichotomize medical history variables
+A$dx1a_7e1[A$dx1a_7e1>=1] <- 1
+A$dx1a_7e2[A$dx1a_7e2>=1] <- 1
+A$dx1a_7e3[A$dx1a_7e3>=1] <- 1
+A$dx1a_7e4[A$dx1a_7e4>=1] <- 1
+A$dx8a_10f1[A$dx8a_10f1>=1] <- 1
+A$dx8a_10f2[A$dx8a_10f2>=1] <- 1
+A$dx8a_10f3[A$dx8a_10f3>=1] <- 1
+A$dx8a_10f4[A$dx8a_10f4>=1] <- 1
+A$dx8a_10f5[A$dx8a_10f5>=1] <- 1
+A$dx8a_10f6[A$dx8a_10f6>=1] <- 1
+A$dx11a17x1[A$dx11a17x1>=1] <- 1
+A$dx11a17x2[A$dx11a17x2>=1] <- 1
+A$dx11a17x3[A$dx11a17x3>=1] <- 1
+A$dx11a17x4[A$dx11a17x4>=1] <- 1
+A$dx11a17x5[A$dx11a17x5>=1] <- 1
+A$dx11a17x6[A$dx11a17x6>=1] <- 1
+A$dx11a17x7[A$dx11a17x7>=1] <- 1
+A$dx11a17x8[A$dx11a17x8>=1] <- 1
+
+# convert categorical variables to factor
+names <- c(1,3,5:6,8:14,17:27,33,35:82,84,86:91,93:96,98,100:109,111:115)
+A[,names]<-lapply(A[,names],factor)
+
+g=colnames(A)
+b1=g=="vf"
+which(b1)
+
+# remove redundant variables
+A1=A[,c(1,3,5:6,9:15,17:20,22:27,33,35:82,85:97,100,102,104,106:115)]
+
+# keep complete cases
+# b=complete.cases(A1)
+# A2=A1[b,]
+
+# another way to drop incomplete cases
+# A2 = na.omit(A1)
+
+# drop one record with missing arvsupp
+A2=A1[(A1$arvsupp!=""),]
+
+# drop 14 ART NAIVE
+A2b=A2[(A2$ARTp!="NAIVE"),]
+
+# drop those missing CD4 count at enrollment
+A3=A2b[(A2b$cd4_cat!="Missing"),]
+
+# n=1571
+
+# collapse ARTp into fewer categories
+# fct_count(A3$ARTp)
+A3$artcat <- fct_collapse(A3$ARTp,"TLE" = "TLE",
+  "AZT/NVP/3TC" = "AZT/NVP/3TC",
+  "AZT/EFV/3TC" = "AZT/EFV/3TC",
+  "TDF/NVP/3TC" = "TDF/NVP/3TC",
+  "PI" = "PI",
+  "other" = c("ABC/EFV/3TC","ABC/NVP/3TC","other"),
+  "TLD" = "TLD"
+)
+
+# table(A3$ARTp,A3$artcat)
+
+# drop ARTp and vldx (due to large amount of missingness)
+A3=A3[,c(1:79,81:94,96:97)]
+
+colnames(A3)=="function" -> b2
+colnames(A3)[b2]="func"
+
+g=colnames(A3)
+g1=setdiff(g,"vf")
+length(g1)
+
+a=paste("vf~",paste(g1,collapse="+"),sep="")
+a1=as.formula(a)
+a1
+
+A3$vf=as.factor(A3$vf)
+
+# set random seed to make results reproducible (used today's date)
+set.seed(20220729)
+
+# label vars
+label(A3$agev) <- "Age"
+label(A3$gender) <- "Sex"
+label(A3$progid) <- "Study Site"
+label(A3$country) <- "Country"
+label(A3$cd4_cat) <- "CD4 Count"
+label(A3$missarv) <- "ART Adherence"
+label(A3$cd4nadc) <- "Lowest CD4"
+label(A3$visyr) <- "Visit Year"
+label(A3$dur_art) <- "Duration on ART"
+label(A3$artcat) <- "ART Regimen"
+label(A3$c_exam) <- "Cervical Exam Results"
+label(A3$mealnum) <- "Number of meals per day"
+label(A3$educat) <- "Education"
+label(A3$cesdcat) <- "CES-D Score"
+label(A3$whostg) <- "WHO Stage"
+label(A3$kids) <- "Parity"
+label(A3$cd4dx) <- "CD4 at Diagnosis"
+label(A3$firstsex) <- "Age at Sexual Debut"
+label(A3$hivdur) <- "Duration since HIV Diagnosis"
+label(A3$cd4artc) <- "CD4 at ART Initiation"
+label(A3$bmic) <- "BMI"
+label(A3$vldx) <- "Viral Load at Diagnosis"
+label(A3$disclose) <- "Disclosed HIV Status"
+label(A3$dx8a_10f1) <- "History of Cancer"
+label(A3$pristudy) <- "Participant in Prior Study"
+label(A3$married) <- "Married"
+label(A3$totnumc) <- "Total in Household"
+label(A3$cigaret) <- "Smoker"
+
+# summary statistics
+summary(A3$agev)
+by(A3$agev, A3$vf, summary)
+summary(A3$dur_art)
+by(A3$dur_art, A3$vf, summary)
+
+# change ref level
+A3 <- within(A3, progid <- relevel(progid, ref = "Kayunga, Uganda"))
+A3 <- within(A3, missarv <- relevel(missarv, ref = "None"))
+A3 <- within(A3, kids <- relevel(kids, ref = "None"))
+
+# table 1
+vars <- c("agev", "gender", "progid", "dur_art", "artcat", "missarv", "cd4_cat")
+
+tab1 <- CreateTableOne(vars = vars, strata = "vf", data = A3, includeNA = F)
+tab1all <- CreateTableOne(vars = vars, data = A3, includeNA = F)
+
+tab <- print(tab1, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+taball <- print(tab1all, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+
+## Save to a CSV file
+write.csv(tab, file = "C:/Users/ndear/Box Sync/Shared Files- Reed and Esber/ML/table1.csv")
+write.csv(taball, file = "C:/Users/ndear/Box Sync/Shared Files- Reed and Esber/ML/table1_all.csv")
+
+# logistic regression
+model1 <- glm(vf~agev, family=binomial(link='logit'), data=A3)
+t1 <- tbl_regression(model1, exponentiate = TRUE)
+t1
+
+model2 <- glm(vf~agev+progid+employed+dur_art+missarv+cd4_cat+cho199+dx11a17x4+kids, family=binomial(link='logit'), data=A3)
+t2 <- tbl_regression(model2, exponentiate = TRUE)
+t2
+```
+
+
+### Distribution of Outcome Variable (Viral Failure)
+
+```{r message=F, warning=F, echo=T, fig.cap='Viral failure among 12% of PLWH on ART; our data is imbalanced which could lead to poor performance and misclassification'}
+print(table(A3$vf))
+pp=print(prop.table(table(A3$vf)))
+plot(A3$vf,main="Viral Failure (0=No; 1=Yes)")
+```
+
+
+### Perform Random Forest Classification - General Approach
+
+```{r message=F, warning=F, echo=T}
+#rfclass <- rfsrc(vf ~ ., data=A3, ntree=1000, mtry=10, nodesize=5, importance=T)
+#print.rfsrc(rfclass)
+
+?randomForest
+library(wsrf)
+rffit <- randomForest(a1, data=A3, mtry=10, ntree=1000, importance=T, type="classification", classwt=1/pp)
+print(rffit)
+```
+
+
+### Perform Balanced Random Forest
+
+```{r}
+brffit <- imbalanced.rfsrc(a1, data=A3, method="brf", importance=TRUE, ntree=1000)
+print(brffit)
+```
+
+### Perform Weighted Random Forest (RFQ)
+
+```{r}
+rfqfit <- imbalanced.rfsrc(a1, data=A3, method="rfq", importance=TRUE, ntree=1000)
+print(rfqfit)
+```
+
+
+### ROC Curves
+
+```{r message=F, warning=F, echo=T, fig.cap='The higher the AUC, the better the model is at predicting 0s as 0s and 1s as 1s. A good model has an AUC close to 1'}
+plot(gg_roc(brffit, which.outcome=1))
+```
+
+
+```{r message=F, warning=F, echo=T, fig.cap='The higher the AUC, the better the model is at predicting 0s as 0s and 1s as 1s. A good model has an AUC close to 1'}
+plot(gg_roc(rfqfit, which.outcome=1))
+```
+
+### ROC Curve - a nice looking version!
+```{r message=F, warning=F, echo=T}
+library(pROC)
+roc(A3$vf, rfqfit$predicted.oob[,2], percent=FALSE, plot=TRUE, grid=TRUE, show.thres=TRUE, legacy.axes = TRUE, reuse.auc = TRUE, print.auc = TRUE, ci=TRUE, ci.type="bars", print.thres.cex = 0.7, main = paste("B) ROC curve using","(N =",nrow(A3),")"))
+
+roc(A3$vf, brffit$predicted.oob[,2], percent=FALSE, plot=TRUE, grid=TRUE, show.thres=TRUE, legacy.axes = TRUE, reuse.auc = TRUE, print.auc = TRUE, ci=TRUE, ci.type="bars", print.thres.cex = 0.7, main = paste("C) ROC curve using","(N =",nrow(A3),")"))
+```
+
+### Variable Importance (VIMP)
+
+```{r message=F, warning=F, echo=T, results='hide', fig.cap='VIMP for a variable, x is the difference between prediction error when x is randomly permuted, compared to prediction error under the observed values. Large positive values indicate greater predictive power.'}
+vimp <- gg_vimp(rfqfit)
+
+# label vars
+vimp$label[vimp$vars == "cd4_cat"] <- "CD4 count"
+vimp$label[vimp$vars == "missarv"] <- "ART adherence"
+vimp$label[vimp$vars == "mealnum"] <- "Number of meals per day"
+vimp$label[vimp$vars == "agev"] <- "Age"
+vimp$label[vimp$vars == "c_exam"] <- "Cervical exam results"
+vimp$label[vimp$vars == "artsrv_a"] <- "Satisfied with clinic wait time"
+vimp$label[vimp$vars == "distance"] <- "Distance to clinic"
+vimp$label[vimp$vars == "hvste_c"] <- "Experienced broken relationships"
+vimp$label[vimp$vars == "vldx"] <- "Viral load at HIV diagnosis"
+vimp$label[vimp$vars == "whiv_d"] <- "Disclosed status to children"
+vimp$label[vimp$vars == "kids"] <- "Parity"
+vimp$label[vimp$vars == "pristudy"] <- "Participated in prior study"
+vimp$label[vimp$vars == "totnumc"] <- "Household size"
+vimp$label[vimp$vars == "whiv_e"] <- "Disclosed status to grandparents"
+vimp$label[vimp$vars == "cd4nadc"] <- "Lowest CD4"
+vimp$label[vimp$vars == "readwrit"] <- "Able to read and write"
+vimp$label[vimp$vars == "dx11a17x3"] <- "History of lipodystrophy"
+vimp$label[vimp$vars == "dx11a17x4"] <- "History of osteoarthritis"
+vimp$label[vimp$vars == "hbv"] <- "Hep B positive"
+vimp$label[vimp$vars == "gfr60"] <- "Renal insufficiency"
+vimp$label[vimp$vars == "gender"] <- "Sex"
+
+plot(vimp,nvar=20)
+imp <- sort(rfqfit$importance[,1],decreasing=TRUE)[1:20]
+v=names(imp)
+
+# posvimp <- vimp %>% filter(positive==TRUE & set=="all")
+
+library(xlsx)
+write.xlsx(vimp, "C:/Users/ndear/Box Sync/Shared Files- Reed and Esber/ML/rf/vimp.xlsx")
+
+```
+
+
+### Depth
+
+```{r message=F, warning=F, echo=T, results='hide', fig.cap='Minimal depth assumes that variables with high impact split nodes nearest to the root node, where they partition the largest % of the population. Smaller minimal depth values indicate a larger impact on the forest prediction.'}
+varsel_md <- var.select(rfqfit)
+gg_md <- gg_minimal_depth(varsel_md, lbls = st.labs)
+print(gg_md)
+plot(gg_md,nvar=20)
+o=gg_md$topvars[1:20]
+
+# average depth
+# vals <- gg_md$varselect
+# avedepth <- mean(vals$depth)
+# print(avedepth)
+# p <- vals %>% filter(depth<avedepth)
+```
+
+
+### Top VIMP Variables
+
+```{r message=F, warning=F, echo=T}
+imp5=sort(rfqfit$importance[,1],decreasing=TRUE)[1:5]
+v5=names(imp5)
+fvimp <- as.formula(paste("vf~",paste(v5,collapse="+"),sep=""))
+v5
+```
+
+
+### Top Depth Variables
+
+```{r message=F, warning=F, echo=T}
+depth6=gg_md$topvars[1:6]
+fdepth <- as.formula(paste("vf~",paste(depth6,collapse="+"),sep=""))
+depth6
+```
+
+
+### Unique Union of Variables by VIMP and Depth
+
+```{r message=F, warning=F, echo=T}
+# Union of Top 20 Vimp and Depth
+u=unique(c(v,o))
+print(u)
+
+# Union of Top 5 Vimp and Depth
+uu=unique(c(depth6,v5))
+print(uu)
+```
+
+
+### Classification Tree Using Unique Union of Variables by VIMP and Depth
+
+```{r message=F, warning=F, echo=T}
+library(rattle)
+library(RColorBrewer)
+
+fdepthvimp=as.formula(paste("vf~",paste(uu,collapse="+"),sep=""))
+topvimpdepth=rpart(fdepthvimp, data=A3, method = "class")
+# print(topvimpdepth)
+
+topvimpdepth=rpart(a1, data=A3, method = "class")
+```
+
+
+### Plot Classification Tree Using Unique Union of Variables by VIMP and Depth
+
+```{r message=F, warning=F, echo=T, fig.cap='The terminal nodes at the bottom of the tree are known as leaf nodes. Each node shows the predicted class (failing vs suppressed), the predicted probability, the percentage of observations in the node.'}
+rpart.plot(topvimpdepth, tweak=1.2, cex=0.45)
+```
+
+
+### Logistic Regression Using Variables Selected by Classification Tree
+
+```{r message=F, warning=F, echo=T}
+options(scipen=999)
+
+# African union defines youths as persons age 15-35 years
+A3$agecat <- ifelse(A3$agev>=36,1,0)
+
+# categorize duration on ART
+A3$durcat<-cut(A3$dur_art,c(0,1.2,5.7,15), right=F)
+
+model1 <- glm(fvimp,family=binomial(link='logit'), data=A3)
+t1 <- tbl_regression(model1, exponentiate = TRUE)
+t1
+
+model2 <- glm(fdepth,family=binomial(link='logit'), data=A3)
+t2 <- tbl_regression(model2, exponentiate = TRUE)
+t2
+
+model3 <- glm(fdepthvimp,family=binomial(link='logit'), data=A3)
+t3 <- tbl_regression(model3, exponentiate = TRUE)
+t3
+```
+
+
+```{r message=F, warning=F, echo=F, fig.cap='A McFaddens pseudo R2 ranging from 0.2 to 0.4 indicates very good model fit'}
+# Model fit
+pR2(model1)
+pR2(model2)
+pR2(model3)
+```
+
+
+### References
+
+https://www.blopig.com/blog/2017/04/a-very-basic-introduction-to-random-forests-using-r/
+
+https://www.r-bloggers.com/2012/12/binary-classification-a-comparison-of-titanic-proportions-between-logistic-regression-random-forests-and-conditional-trees/
+
+https://www.machinelearningplus.com/machine-learning/caret-package/
+
+https://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/
+
+https://www.edureka.co/blog/random-forest-classifier/
+
+https://stats.stackexchange.com/questions/190911/randomforest-vs-randomforestsrc-discrepancies
+
+http://www.milbo.org/rpart-plot/prp.pdf?_sm_pdc=1&_sm_rid=HFvQkssM8TNjNj8Vf4stJP0VSjsWvrksttJRWVW
+
+https://www.sciencedirect.com/science/article/abs/pii/S0957417419303574
+
+https://arxiv.org/pdf/1612.08974.pdf
+
+https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm
+
+https://www.rdocumentation.org/packages/randomForestSRC/versions/2.11.0/topics/imbalanced.rfsrc
+
+https://statistics.berkeley.edu/sites/default/files/tech-reports/666.pdf
+
+http://www2.stat.duke.edu/~rcs46/lectures_2017/08-trees/08-tree-advanced.pdf
